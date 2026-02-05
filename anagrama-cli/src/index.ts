@@ -729,6 +729,9 @@ async function doPlay(config: StoredConfig, minimal = false): Promise<void> {
     return;
   }
 
+  const spinner = new ColorSpinner("Loading today's puzzle...");
+  spinner.start();
+
   const puzzle = await apiGet<{
     id?: string;
     dateKey?: string;
@@ -737,9 +740,17 @@ async function doPlay(config: StoredConfig, minimal = false): Promise<void> {
     letters?: string;
     poolScramble?: string;
     maxAttempts?: number;
-    session?: { attempts?: number; done?: boolean; win?: boolean; found?: string[] };
+    session?: {
+      attempts?: number;
+      done?: boolean;
+      win?: boolean;
+      hintsUsed?: number;
+      guesses?: { word: string; marks: string[]; isTarget?: boolean; isAlt?: boolean }[];
+    };
     error?: string;
   }>(baseUrl, "/api/puzzle", token);
+
+  spinner.stop();
 
   if (puzzle.status >= 400 || puzzle.data?.error) {
     console.log(chalk.red("Failed to load puzzle."));
@@ -752,10 +763,51 @@ async function doPlay(config: StoredConfig, minimal = false): Promise<void> {
   const scramble = puzzle.data.scramble || puzzle.data.letters || "";
   const targetLength = puzzle.data.length || 5;
 
+  // Restore progress from server (syncs with website)
   let done = puzzle.data.session?.done || false;
   let attempts = puzzle.data.session?.attempts || 0;
-  let altFound = 0; // Track alternate anagrams found
+  const win = puzzle.data.session?.win || false;
+
+  // If already completed (on website or CLI), show the result
+  if (done) {
+    console.clear();
+    const formattedDate = formatDateLong(dateKey);
+    console.log();
+    if (win) {
+      console.log(accent.bold("  ╔════════════════════════════════════════════════════════╗"));
+      console.log(accent.bold("  ║") + chalk.bold.white("                  Already Solved!                        ") + accent.bold("║"));
+      console.log(accent.bold("  ╚════════════════════════════════════════════════════════╝"));
+      console.log();
+      console.log(chalk.green.bold("  🎉 You already solved today's puzzle!"));
+      console.log(chalk.gray(`     ${formattedDate}`));
+      console.log();
+      console.log(chalk.gray(`     Solved in ${attempts} ${attempts === 1 ? "attempt" : "attempts"}`));
+    } else {
+      console.log(accent.bold("  ╔════════════════════════════════════════════════════════╗"));
+      console.log(accent.bold("  ║") + chalk.bold.white("                  Puzzle Complete                        ") + accent.bold("║"));
+      console.log(accent.bold("  ╚════════════════════════════════════════════════════════╝"));
+      console.log();
+      console.log(chalk.yellow("  You've already attempted today's puzzle."));
+      console.log(chalk.gray(`     ${formattedDate}`));
+      console.log();
+      console.log(chalk.gray(`     Used all ${maxLives} lives`));
+    }
+    console.log();
+    console.log(chalk.gray("  Come back tomorrow for a new puzzle!"));
+    console.log();
+    return;
+  }
+
+  // Restore guess history from server (syncs with website)
   const guessHistory: { word: string; marks: string[] }[] = [];
+  let altFound = 0;
+
+  if (Array.isArray(puzzle.data.session?.guesses)) {
+    for (const g of puzzle.data.session.guesses) {
+      guessHistory.push({ word: g.word, marks: g.marks });
+      if (g.isAlt) altFound++;
+    }
+  }
 
   let currentScramble = scramble;
   const letterPool = currentScramble.toUpperCase().split("");

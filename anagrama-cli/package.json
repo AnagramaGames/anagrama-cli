@@ -1,5 +1,5 @@
 {
-  "name": "anagrama-cli",
+  "name": "anagrama",
   "version": "0.1.0",
   "description": "Terminal client for Anagrama",
   "type": "module",
