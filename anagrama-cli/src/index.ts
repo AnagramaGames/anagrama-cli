@@ -9,10 +9,57 @@ import os from "os";
 import path from "path";
 import readline from "readline/promises";
 import process from "process";
+import keytar from "keytar";
 
 const DEFAULT_BASE_URL = process.env.ANAGRAMA_URL || "https://playanagrama.com";
+const KEYCHAIN_SERVICE = "anagrama-cli";
+const KEYCHAIN_ACCOUNT = "auth-token";
 const CONFIG_DIR = path.join(os.homedir(), ".anagrama");
 const CONFIG_PATH = path.join(CONFIG_DIR, "cli.json");
+
+// Secure credential storage functions
+async function getSecureToken(): Promise<string | null> {
+  try {
+    return await keytar.getPassword(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT);
+  } catch {
+    return null;
+  }
+}
+
+async function setSecureToken(token: string): Promise<boolean> {
+  try {
+    await keytar.setPassword(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT, token);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function deleteSecureToken(): Promise<void> {
+  try {
+    await keytar.deletePassword(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT);
+  } catch {
+    // Ignore errors on deletion
+  }
+}
+
+// Migrate existing plain-text tokens to secure storage
+async function migrateTokenToKeychain(): Promise<void> {
+  try {
+    const raw = await fs.readFile(CONFIG_PATH, "utf8");
+    const config = JSON.parse(raw) as StoredConfig;
+    if (config.token) {
+      // Token exists in plain text - migrate it
+      await setSecureToken(config.token);
+      // Remove token from file
+      const { token, ...rest } = config;
+      await fs.writeFile(CONFIG_PATH, JSON.stringify(rest, null, 2), "utf8");
+      console.log(chalk.green("✓ Migrated credentials to secure storage"));
+    }
+  } catch {
+    // No existing config or already migrated
+  }
+}
 
 // Prevent Ctrl+C from killing the app - must use menu to exit
 process.on("SIGINT", () => {
@@ -54,15 +101,26 @@ function getRandomWelcome(name: string): string {
 async function readConfig(): Promise<StoredConfig> {
   try {
     const raw = await fs.readFile(CONFIG_PATH, "utf8");
-    return JSON.parse(raw) as StoredConfig;
+    const config = JSON.parse(raw) as StoredConfig;
+    // Get token from secure storage
+    const token = await getSecureToken();
+    return { ...config, token: token || undefined };
   } catch {
-    return {};
+    // Even if config file doesn't exist, try to get token from keychain
+    const token = await getSecureToken();
+    return { token: token || undefined };
   }
 }
 
 async function writeConfig(next: StoredConfig): Promise<void> {
+  // Store token securely in system keychain
+  if (next.token) {
+    await setSecureToken(next.token);
+  }
+  // Write non-sensitive data to JSON (without token)
+  const { token, ...configWithoutToken } = next;
   await fs.mkdir(CONFIG_DIR, { recursive: true });
-  await fs.writeFile(CONFIG_PATH, JSON.stringify(next, null, 2), "utf8");
+  await fs.writeFile(CONFIG_PATH, JSON.stringify(configWithoutToken, null, 2), "utf8");
 }
 
 function normalizeBaseUrl(url: string): string {
@@ -353,6 +411,7 @@ async function doLogin(baseUrl: string, opts: { open?: boolean; label?: string }
 }
 
 async function doLogout(): Promise<void> {
+  await deleteSecureToken();
   await writeConfig({});
   console.log(chalk.green("Logged out. See you next time!"));
 }
@@ -1017,6 +1076,9 @@ async function doPlay(config: StoredConfig, minimal = false): Promise<void> {
 }
 
 async function mainLoop(): Promise<void> {
+  // Migrate any existing plain-text tokens to secure storage
+  await migrateTokenToKeychain();
+
   let running = true;
 
   while (running) {
