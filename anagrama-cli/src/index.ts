@@ -463,6 +463,7 @@ function printGameHeader(dateKey: string, scramble: string, targetLength: number
 // Available commands for suggestions
 const COMMANDS = [
   { name: "/help", desc: "Show all commands" },
+  { name: "/hint", desc: "Get a hint" },
   { name: "/exit", desc: "Return to menu" },
   { name: "/quit", desc: "Exit the app" },
   { name: "/shuffle", desc: "Shuffle the letters" },
@@ -472,6 +473,7 @@ function printCommands(): void {
   console.log();
   console.log(accent.bold("  Commands:"));
   console.log(chalk.gray("  /help     ") + chalk.white("Show this help"));
+  console.log(chalk.gray("  /hint     ") + chalk.white("Get a hint (reveals one letter)"));
   console.log(chalk.gray("  /exit     ") + chalk.white("Return to menu"));
   console.log(chalk.gray("  /quit     ") + chalk.white("Exit the app"));
   console.log(chalk.gray("  /shuffle  ") + chalk.white("Shuffle the letters (visual only)"));
@@ -699,15 +701,6 @@ async function interactiveInput(
         return;
       }
 
-      // ? shortcut
-      if (char === "?" && input === "") {
-        stdin.setRawMode(false);
-        stdin.removeListener("data", handleKey);
-        console.log();
-        resolve({ input: "?", isCommand: true });
-        return;
-      }
-
       // Word mode - only available letters
       if (/^[a-zA-Z]$/.test(char)) {
         const idx = isLetterAvailable(char, pool, usedIndices);
@@ -792,7 +785,7 @@ async function doPlay(config: StoredConfig, minimal = false): Promise<void> {
 
   // Print command hint
   if (!useMinimal) {
-    console.log(chalk.gray("    ? for shortcuts"));
+    console.log(chalk.gray("    / for shortcuts"));
   }
   console.log();
 
@@ -803,7 +796,7 @@ async function doPlay(config: StoredConfig, minimal = false): Promise<void> {
       (input, usedIndices) => {
         // Re-render game to show used letters
         renderGame(true, usedIndices, input);
-        if (!useMinimal) console.log(chalk.gray("    ? for shortcuts"));
+        if (!useMinimal) console.log(chalk.gray("    / for shortcuts"));
         console.log();
       }
     );
@@ -816,15 +809,48 @@ async function doPlay(config: StoredConfig, minimal = false): Promise<void> {
       switch (cmd) {
         case "help":
         case "h":
-        case "?":
           renderGame(true);
-          if (!useMinimal) console.log(chalk.gray("    ? for shortcuts"));
-          console.log();
-          // Save cursor position, print commands below, restore cursor
-          process.stdout.write("\x1b[s"); // Save cursor
           printCommands();
-          process.stdout.write("\x1b[u"); // Restore cursor to input line
+          console.log(chalk.gray("    Press any key to continue..."));
+          // Wait for a keypress before continuing
+          await new Promise<void>((resolve) => {
+            const stdin = process.stdin;
+            stdin.setRawMode(true);
+            stdin.resume();
+            stdin.once("data", () => {
+              stdin.setRawMode(false);
+              resolve();
+            });
+          });
+          renderGame(true);
+          if (!useMinimal) console.log(chalk.gray("    / for shortcuts"));
+          console.log();
           continue;
+        case "hint": {
+          const hintResult = await apiPost<{
+            hint?: string;
+            position?: number;
+            letter?: string;
+            message?: string;
+            error?: string;
+          }>(baseUrl, "/api/hint", {}, token);
+
+          renderGame(true);
+          if (!useMinimal) console.log(chalk.gray("    / for shortcuts"));
+          console.log();
+
+          if (hintResult.status >= 400 || hintResult.data.error) {
+            console.log(chalk.yellow(`  ${hintResult.data.error || hintResult.data.message || "No hints available"}`));
+          } else if (hintResult.data.letter && hintResult.data.position !== undefined) {
+            console.log(chalk.cyan(`  💡 Hint: Position ${hintResult.data.position + 1} is "${hintResult.data.letter.toUpperCase()}"`));
+          } else if (hintResult.data.hint) {
+            console.log(chalk.cyan(`  💡 ${hintResult.data.hint}`));
+          } else if (hintResult.data.message) {
+            console.log(chalk.yellow(`  ${hintResult.data.message}`));
+          }
+          console.log();
+          continue;
+        }
         case "exit":
         case "back":
         case "menu":
@@ -841,25 +867,20 @@ async function doPlay(config: StoredConfig, minimal = false): Promise<void> {
           letterPool.length = 0;
           letterPool.push(...currentScramble.toUpperCase().split(""));
           renderGame(true);
-          if (!useMinimal) console.log(chalk.gray("    ? for shortcuts"));
+          if (!useMinimal) console.log(chalk.gray("    / for shortcuts"));
           console.log();
           // Print message below input
           process.stdout.write("\x1b[s\n" + chalk.gray("  Letters shuffled!") + "\x1b[u");
           continue;
         default:
           renderGame(true);
-          if (!useMinimal) console.log(chalk.gray("    ? for shortcuts"));
+          if (!useMinimal) console.log(chalk.gray("    / for shortcuts"));
           console.log();
           // Print message below input
           process.stdout.write("\x1b[s\n" + chalk.yellow(`  Unknown command: /${cmd}. Type /help for commands.`) + "\x1b[u");
           continue;
       }
     }
-
-    // Reset display after input
-    renderGame(true);
-    if (!useMinimal) console.log(chalk.gray("    ? for shortcuts"));
-    console.log();
 
     const result = await apiPost<{
       validWord?: boolean;
@@ -874,6 +895,9 @@ async function doPlay(config: StoredConfig, minimal = false): Promise<void> {
     }>(baseUrl, "/api/guess", { guess: answer }, token);
 
     if (result.status >= 500) {
+      renderGame(true);
+      if (!useMinimal) console.log(chalk.gray("    / for shortcuts"));
+      console.log();
       console.log(chalk.red("  Server error."));
       break;
     }
@@ -896,7 +920,12 @@ async function doPlay(config: StoredConfig, minimal = false): Promise<void> {
     }
     done = result.data.done ?? done;
 
-    // Show guess result inline (don't re-render whole game)
+    // Re-render with updated stats
+    renderGame(true);
+    if (!useMinimal) console.log(chalk.gray("    / for shortcuts"));
+    console.log();
+
+    // Show guess result inline
     if (marks.length > 0) {
       console.log(`    ${renderMarks(answer, marks)}`);
     }
