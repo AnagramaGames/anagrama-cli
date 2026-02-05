@@ -10,12 +10,18 @@ import path from "path";
 import readline from "readline/promises";
 import process from "process";
 import keytar from "keytar";
+import { execFile } from "child_process";
 
-const DEFAULT_BASE_URL = process.env.ANAGRAMA_URL || "https://playanagrama.com";
+const DEFAULT_SITE_URL = process.env.ANAGRAMA_URL || "https://playanagrama.com";
+const DEFAULT_API_URL = process.env.ANAGRAMA_API_URL || "https://api.playanagrama.com";
 const KEYCHAIN_SERVICE = "anagrama-cli";
 const KEYCHAIN_ACCOUNT = "auth-token";
 const CONFIG_DIR = path.join(os.homedir(), ".anagrama");
 const CONFIG_PATH = path.join(CONFIG_DIR, "cli.json");
+const UPDATE_PATH = path.join(CONFIG_DIR, "update.json");
+const CURRENT_VERSION = "0.1.1";
+const NPM_REGISTRY_URL = "https://registry.npmjs.org/anagrama/latest";
+const CHECK_INTERVAL_MS = 3_600_000; // 1 hour
 
 // Secure credential storage functions
 async function getSecureToken(): Promise<string | null> {
@@ -68,7 +74,8 @@ process.on("SIGINT", () => {
 });
 
 type StoredConfig = {
-  baseUrl?: string;
+  baseUrl?: string;  // site URL (for browser links)
+  apiUrl?: string;   // API URL (for backend calls)
   token?: string;
   user?: {
     userId?: string;
@@ -126,6 +133,108 @@ async function writeConfig(next: StoredConfig): Promise<void> {
 function normalizeBaseUrl(url: string): string {
   return url.replace(/\/$/, "");
 }
+
+// ── Auto-update ──────────────────────────────────────────────────────────────
+
+type UpdateState = {
+  lastCheck?: string;
+  latestVersion?: string;
+  installed?: boolean;
+};
+
+async function readUpdateState(): Promise<UpdateState> {
+  try {
+    const raw = await fs.readFile(UPDATE_PATH, "utf8");
+    return JSON.parse(raw) as UpdateState;
+  } catch {
+    return {};
+  }
+}
+
+async function writeUpdateState(state: UpdateState): Promise<void> {
+  await fs.mkdir(CONFIG_DIR, { recursive: true });
+  await fs.writeFile(UPDATE_PATH, JSON.stringify(state, null, 2), "utf8");
+}
+
+/** Compare two semver strings (x.y.z). Returns true if a > b. */
+function semverGt(a: string, b: string): boolean {
+  const pa = a.split(".").map(Number);
+  const pb = b.split(".").map(Number);
+  for (let i = 0; i < 3; i++) {
+    if ((pa[i] || 0) > (pb[i] || 0)) return true;
+    if ((pa[i] || 0) < (pb[i] || 0)) return false;
+  }
+  return false;
+}
+
+/** In-memory flag set when background install finishes during this session. */
+let updateInstalledVersion: string | null = null;
+
+/**
+ * Check npm registry for a newer version. Respects CHECK_INTERVAL_MS throttle.
+ * Returns the latest version string if an update is available, null otherwise.
+ */
+async function checkForUpdate(): Promise<string | null> {
+  try {
+    const state = await readUpdateState();
+
+    // If a previous install completed but user has since restarted, clear the flag
+    if (state.installed && state.latestVersion && !semverGt(state.latestVersion, CURRENT_VERSION)) {
+      await writeUpdateState({ ...state, installed: false });
+    }
+
+    // If we already installed an update this session or a previous one, skip
+    if (state.installed && state.latestVersion && semverGt(state.latestVersion, CURRENT_VERSION)) {
+      updateInstalledVersion = state.latestVersion;
+      return null; // already installed, just needs restart
+    }
+
+    // Throttle: skip if checked recently
+    if (state.lastCheck) {
+      const elapsed = Date.now() - new Date(state.lastCheck).getTime();
+      if (elapsed < CHECK_INTERVAL_MS) return null;
+    }
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 5000);
+    const res = await fetch(NPM_REGISTRY_URL, { signal: controller.signal });
+    clearTimeout(timer);
+
+    if (!res.ok) return null;
+    const data = (await res.json()) as { version?: string };
+    const latest = data.version;
+    if (!latest) return null;
+
+    await writeUpdateState({ lastCheck: new Date().toISOString(), latestVersion: latest, installed: false });
+
+    return semverGt(latest, CURRENT_VERSION) ? latest : null;
+  } catch {
+    return null; // network error, offline, etc. - silently skip
+  }
+}
+
+/**
+ * Install the update in the background via npm. Sets updateInstalledVersion
+ * when done so the UI can show a restart prompt.
+ */
+function installUpdateInBackground(version: string): void {
+  try {
+    execFile("npm", ["install", "-g", `anagrama@${version}`], { timeout: 60_000 }, async (err) => {
+      if (!err) {
+        updateInstalledVersion = version;
+        await writeUpdateState({
+          lastCheck: new Date().toISOString(),
+          latestVersion: version,
+          installed: true,
+        }).catch(() => {});
+      }
+    });
+  } catch {
+    // npm not found or other error - silently skip
+  }
+}
+
+// ── End auto-update ──────────────────────────────────────────────────────────
 
 async function apiPost<T>(baseUrl: string, pathUrl: string, body: unknown, token?: string): Promise<ApiResponse<T>> {
   const res = await fetch(`${baseUrl}${pathUrl}`, {
@@ -288,7 +397,7 @@ function printHomescreen(config: StoredConfig, minimal = false): void {
   console.log(chalk.hex("#CC6B3D")("  │") + accent(mascotLines[5].padEnd(leftColWidth + 2)) + chalk.gray(" │ ") + chalk.gray("/help     Show all commands".padEnd(rightColWidth)) + chalk.hex("#CC6B3D")("│"));
 
   // Server info at bottom
-  const serverInfo = `  ${config.baseUrl || DEFAULT_BASE_URL}`;
+  const serverInfo = `  ${config.baseUrl || DEFAULT_SITE_URL}`;
   console.log(chalk.hex("#CC6B3D")("  │") + chalk.gray(serverInfo.padEnd(leftColWidth + 2)) + chalk.gray(" │ ") + " ".repeat(rightColWidth) + chalk.hex("#CC6B3D")("│"));
 
   // Box bottom
@@ -297,7 +406,7 @@ function printHomescreen(config: StoredConfig, minimal = false): void {
 }
 
 
-async function doLogin(baseUrl: string, opts: { open?: boolean; label?: string }): Promise<StoredConfig | null> {
+async function doLogin(siteUrl: string, apiUrl: string, opts: { open?: boolean; label?: string }): Promise<StoredConfig | null> {
   const config = await readConfig();
 
   const start = await apiPost<{
@@ -307,7 +416,7 @@ async function doLogin(baseUrl: string, opts: { open?: boolean; label?: string }
     expires_in?: number;
     interval?: number;
     error?: string;
-  }>(baseUrl, "/api/cli/auth/start", {
+  }>(apiUrl, "/cli/auth/start", {
     label: opts.label || "terminal",
     clientName: "anagrama-cli",
   });
@@ -325,7 +434,7 @@ async function doLogin(baseUrl: string, opts: { open?: boolean; label?: string }
   const expiresIn = Math.max(60, start.data.expires_in || 900);
 
   // Build manual URL (without device_code, just user_code)
-  const manualUrl = `${baseUrl}/cli-auth?manual=true`;
+  const manualUrl = `${siteUrl}/cli-auth?manual=true`;
 
   console.log();
   console.log(chalk.bold.cyan("  ╭─────────────────────────────────────────╮"));
@@ -373,7 +482,7 @@ async function doLogin(baseUrl: string, opts: { open?: boolean; label?: string }
       token?: string;
       user?: { userId?: string; username?: string | null; displayName?: string | null };
       error?: string;
-    }>(baseUrl, "/api/cli/auth/poll", { device_code: deviceCode });
+    }>(apiUrl, "/cli/auth/poll", { device_code: deviceCode });
 
     if (debug) {
       console.log(chalk.gray(`\n[DEBUG] Poll response: status=${poll.status}, data=${JSON.stringify(poll.data)}`));
@@ -389,7 +498,8 @@ async function doLogin(baseUrl: string, opts: { open?: boolean; label?: string }
     if (poll.data?.token) {
       const nextConfig: StoredConfig = {
         ...config,
-        baseUrl,
+        baseUrl: siteUrl,
+        apiUrl,
         token: poll.data.token,
         user: poll.data.user,
         updatedAt: new Date().toISOString(),
@@ -434,7 +544,7 @@ async function doWhoami(config: StoredConfig): Promise<void> {
   console.log(`  ${chalk.gray("Display Name:")}  ${chalk.white.bold(name)}`);
   console.log(`  ${chalk.gray("Username:")}      ${chalk.white("@" + username)}`);
   console.log(`  ${chalk.gray("User ID:")}       ${chalk.gray(userId)}`);
-  console.log(`  ${chalk.gray("Server:")}        ${chalk.blue(config.baseUrl || DEFAULT_BASE_URL)}`);
+  console.log(`  ${chalk.gray("Server:")}        ${chalk.blue(config.baseUrl || DEFAULT_SITE_URL)}`);
   console.log(`  ${chalk.gray("Last Login:")}    ${chalk.white(lastLogin)}`);
   console.log();
 }
@@ -779,7 +889,7 @@ async function interactiveInput(
 }
 
 async function doPlay(config: StoredConfig, minimal = false): Promise<void> {
-  const baseUrl = normalizeBaseUrl(config.baseUrl || DEFAULT_BASE_URL);
+  const apiUrl = normalizeBaseUrl(config.apiUrl || DEFAULT_API_URL);
   const token = config.token;
   const useMinimal = minimal || config.minimal || false;
 
@@ -807,7 +917,7 @@ async function doPlay(config: StoredConfig, minimal = false): Promise<void> {
       guesses?: { word: string; marks: string[]; isTarget?: boolean; isAlt?: boolean }[];
     };
     error?: string;
-  }>(baseUrl, "/api/puzzle", token);
+  }>(apiUrl, "/anagrama/api/puzzle", token);
 
   spinner.stop();
 
@@ -944,7 +1054,7 @@ async function doPlay(config: StoredConfig, minimal = false): Promise<void> {
             letter?: string;
             message?: string;
             error?: string;
-          }>(baseUrl, "/api/hint", {}, token);
+          }>(apiUrl, "/anagrama/api/hint", {}, token);
 
           renderGame(true);
           if (!useMinimal) console.log(chalk.gray("    / for shortcuts"));
@@ -1003,7 +1113,7 @@ async function doPlay(config: StoredConfig, minimal = false): Promise<void> {
       attempts?: number;
       done?: boolean;
       message?: string;
-    }>(baseUrl, "/api/guess", { guess: answer }, token);
+    }>(apiUrl, "/anagrama/api/guess", { guess: answer }, token);
 
     if (result.status >= 500) {
       renderGame(true);
@@ -1079,6 +1189,12 @@ async function mainLoop(): Promise<void> {
   // Migrate any existing plain-text tokens to secure storage
   await migrateTokenToKeychain();
 
+  // Check for updates (non-blocking, throttled to once/hour)
+  const availableUpdate = await checkForUpdate();
+  if (availableUpdate) {
+    installUpdateInBackground(availableUpdate);
+  }
+
   let running = true;
 
   while (running) {
@@ -1087,6 +1203,15 @@ async function mainLoop(): Promise<void> {
 
     console.clear();
     printHomescreen(config, useMinimal);
+
+    // Show update banner if a new version was installed
+    if (updateInstalledVersion) {
+      console.log(chalk.cyan("  ┌──────────────────────────────────────────┐"));
+      console.log(chalk.cyan("  │") + chalk.white(`  Update installed ${chalk.bold(`v${updateInstalledVersion}`)}`.padEnd(42)) + chalk.cyan("│"));
+      console.log(chalk.cyan("  │") + chalk.gray("  Restart the CLI to use it.".padEnd(42)) + chalk.cyan("│"));
+      console.log(chalk.cyan("  └──────────────────────────────────────────┘"));
+      console.log();
+    }
 
     if (!config.token) {
       // Not logged in
@@ -1099,8 +1224,9 @@ async function mainLoop(): Promise<void> {
       });
 
       if (action === "login") {
-        const baseUrl = normalizeBaseUrl(DEFAULT_BASE_URL);
-        const newConfig = await doLogin(baseUrl, { open: true });
+        const siteUrl = normalizeBaseUrl(DEFAULT_SITE_URL);
+        const apiUrl = normalizeBaseUrl(DEFAULT_API_URL);
+        const newConfig = await doLogin(siteUrl, apiUrl, { open: true });
         if (newConfig) {
           const name = newConfig.user?.displayName || newConfig.user?.username || "Player";
           console.log();
@@ -1188,8 +1314,9 @@ program
   .option("-l, --label <label>", "Label for this device")
   .action(async (opts) => {
     const config = await readConfig();
-    const baseUrl = normalizeBaseUrl(opts.url || config.baseUrl || DEFAULT_BASE_URL);
-    const newConfig = await doLogin(baseUrl, { open: opts.open, label: opts.label });
+    const siteUrl = normalizeBaseUrl(opts.url || config.baseUrl || DEFAULT_SITE_URL);
+    const apiUrl = normalizeBaseUrl(config.apiUrl || DEFAULT_API_URL);
+    const newConfig = await doLogin(siteUrl, apiUrl, { open: opts.open, label: opts.label });
     if (newConfig) {
       const name = newConfig.user?.displayName || newConfig.user?.username || "Player";
       console.log(chalk.green.bold(getRandomWelcome(name)));
@@ -1214,12 +1341,12 @@ program
 program
   .command("play")
   .description("Play the daily Anagrama puzzle")
-  .option("-u, --url <url>", "Frontend base URL")
+  .option("-u, --url <url>", "API base URL")
   .option("-m, --minimal", "Use minimal output mode")
   .action(async (opts) => {
     const config = await readConfig();
     if (opts.url) {
-      config.baseUrl = normalizeBaseUrl(opts.url);
+      config.apiUrl = normalizeBaseUrl(opts.url);
     }
     await doPlay(config, opts.minimal);
   });
