@@ -1,11 +1,22 @@
 {
   "name": "anagrama",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Terminal client for Anagrama",
   "type": "module",
+  "license": "MIT",
+  "author": "imjustricky",
+  "keywords": [
+    "anagrama",
+    "word-game",
+    "cli",
+    "terminal"
+  ],
   "bin": {
     "anagrama": "dist/index.js"
   },
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js"
