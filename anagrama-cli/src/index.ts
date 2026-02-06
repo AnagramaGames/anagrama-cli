@@ -123,18 +123,18 @@ type ThemeColors = {
 };
 
 const THEMES: Record<string, ThemeColors> = {
-  // Dark themes (no bg — use terminal background)
-  amber:    { accent: "#F5A623", border: "#CC6B3D", fg: "#FFFFFF", dim: "#888888", bg: "", tileFg: "#1a1a1a", label: "Amber (Default)", group: "dark" },
-  ocean:    { accent: "#4FC3F7", border: "#0288D1", fg: "#FFFFFF", dim: "#888888", bg: "", tileFg: "#1a1a1a", label: "Ocean", group: "dark" },
-  forest:   { accent: "#66BB6A", border: "#388E3C", fg: "#FFFFFF", dim: "#888888", bg: "", tileFg: "#1a1a1a", label: "Forest", group: "dark" },
-  sunset:   { accent: "#EF5350", border: "#C62828", fg: "#FFFFFF", dim: "#888888", bg: "", tileFg: "#1a1a1a", label: "Sunset", group: "dark" },
-  lavender: { accent: "#CE93D8", border: "#8E24AA", fg: "#FFFFFF", dim: "#888888", bg: "", tileFg: "#1a1a1a", label: "Lavender", group: "dark" },
-  mint:     { accent: "#4DB6AC", border: "#00897B", fg: "#FFFFFF", dim: "#888888", bg: "", tileFg: "#1a1a1a", label: "Mint", group: "dark" },
-  // Light themes (bg highlight so dark text is readable on any terminal)
+  // Dark themes
+  amber:    { accent: "#F5A623", border: "#CC6B3D", fg: "#FFFFFF", dim: "#888888", bg: "#1a1a1a", tileFg: "#1a1a1a", label: "Amber (Default)", group: "dark" },
+  ocean:    { accent: "#4FC3F7", border: "#0288D1", fg: "#FFFFFF", dim: "#888888", bg: "#1a1a1a", tileFg: "#1a1a1a", label: "Ocean", group: "dark" },
+  forest:   { accent: "#66BB6A", border: "#388E3C", fg: "#FFFFFF", dim: "#888888", bg: "#1a1a1a", tileFg: "#1a1a1a", label: "Forest", group: "dark" },
+  sunset:   { accent: "#EF5350", border: "#C62828", fg: "#FFFFFF", dim: "#888888", bg: "#1a1a1a", tileFg: "#1a1a1a", label: "Sunset", group: "dark" },
+  lavender: { accent: "#CE93D8", border: "#8E24AA", fg: "#FFFFFF", dim: "#888888", bg: "#1a1a1a", tileFg: "#1a1a1a", label: "Lavender", group: "dark" },
+  mint:     { accent: "#4DB6AC", border: "#00897B", fg: "#FFFFFF", dim: "#888888", bg: "#1a1a1a", tileFg: "#1a1a1a", label: "Mint", group: "dark" },
+  // Light themes
   "light":      { accent: "#D4760A", border: "#B8621A", fg: "#1a1a1a", dim: "#666666", bg: "#F5F5F0", tileFg: "#FFFFFF", label: "Light", group: "light" },
   "light-blue": { accent: "#0277BD", border: "#01579B", fg: "#1a1a1a", dim: "#666666", bg: "#EDF2F7", tileFg: "#FFFFFF", label: "Light Blue", group: "light" },
   // Accessibility - high contrast
-  "hc-dark":  { accent: "#FFD600", border: "#FFAB00", fg: "#FFFFFF", dim: "#CCCCCC", bg: "",        tileFg: "#000000", label: "High Contrast Dark", group: "accessibility" },
+  "hc-dark":  { accent: "#FFD600", border: "#FFAB00", fg: "#FFFFFF", dim: "#CCCCCC", bg: "#000000", tileFg: "#000000", label: "High Contrast Dark", group: "accessibility" },
   "hc-light": { accent: "#0D47A1", border: "#1565C0", fg: "#000000", dim: "#444444", bg: "#FFFFFF", tileFg: "#FFFFFF", label: "High Contrast Light", group: "accessibility" },
 };
 
@@ -595,17 +595,15 @@ async function doThemePicker(): Promise<string | null> {
           lastGroup = t.group;
           const groupLabel = t.group === "dark" ? "Dark" : t.group === "light" ? "Light" : "Accessibility";
           console.log();
-          console.log(previewDim(`    ${groupLabel}`));
+          console.log(previewBgWrap(previewDim(`    ${groupLabel}  `)));
         }
         const dot = chalk.hex(t.accent)("●");
         if (i === idx) {
-          // Apply bg highlight for light themes so dark text is visible on dark terminals
-          const label = theme.bg
-            ? chalk.bgHex(theme.bg).hex(theme.fg).bold(` ${t.label} `)
-            : previewFg.bold(t.label);
+          const label = chalk.bgHex(theme.bg).hex(theme.fg).bold(` ${t.label} `);
           console.log(`  ${chalk.hex(t.accent)("▸")} ${dot} ${label}`);
         } else {
-          console.log(`    ${dot} ${previewDim(t.label)}`);
+          const label = chalk.bgHex(t.bg).hex(t.dim)(` ${t.label} `);
+          console.log(`    ${dot} ${label}`);
         }
       }
 
