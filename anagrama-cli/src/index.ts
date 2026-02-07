@@ -555,6 +555,13 @@ async function checkForUpdate(): Promise<string | null> {
   }
 }
 
+/** Resolve the npm binary next to the current Node binary (handles nvm/fnm). */
+function resolveNpmPath(): string {
+  const binDir = path.dirname(process.execPath);
+  const npmBin = path.join(binDir, "npm");
+  return npmBin;
+}
+
 /**
  * Install the update in the background via npm. Sets updateInstalledVersion
  * when done so the UI can show a restart prompt.
@@ -562,7 +569,8 @@ async function checkForUpdate(): Promise<string | null> {
 function installUpdateInBackground(version: string): void {
   pendingUpdateVersion = version;
   try {
-    execFile("npm", ["install", "-g", `anagrama@${version}`], { shell: true, timeout: 60_000 }, async (err) => {
+    const npm = resolveNpmPath();
+    execFile(npm, ["install", "-g", `anagrama@${version}`], { timeout: 60_000 }, async (err) => {
       if (!err) {
         updateInstalledVersion = version;
         pendingUpdateVersion = null;
@@ -622,7 +630,8 @@ async function doManualUpdate(): Promise<"installed" | "up-to-date" | "skipped" 
     installSpinner.start();
 
     return await new Promise<"installed" | "error">((resolve) => {
-      execFile("npm", ["install", "-g", `anagrama@${latest}`], { shell: true, timeout: 60_000 }, (err) => {
+      const npm = resolveNpmPath();
+      execFile(npm, ["install", "-g", `anagrama@${latest}`], { timeout: 60_000 }, (err) => {
         if (err) {
           installSpinner.stop(chalk.red(`  Update failed. Try manually: npm install -g anagrama@latest`));
           resolve("error");
