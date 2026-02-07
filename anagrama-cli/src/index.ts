@@ -278,6 +278,87 @@ async function updateStats(won: boolean, attempts: number, dateKey: string): Pro
   return stats;
 }
 
+// ── Defineagram stats ────────────────────────────────────────────────────────
+
+const DEFINEAGRAM_STATS_PATH = path.join(CONFIG_DIR, "defineagram-stats.json");
+
+type DefineagramStats = {
+  gamesPlayed: number;
+  gamesWon: number;
+  currentStreak: number;
+  maxStreak: number;
+  bestTimeMs: number | null;
+  avgTimeMs: number | null;
+  totalTimeMs: number;
+  lastPlayedDate: string;
+  lastPlayedWon: boolean;
+  lastPlayedTimeMs: number;
+};
+
+const DEFAULT_DEFINEAGRAM_STATS: DefineagramStats = {
+  gamesPlayed: 0,
+  gamesWon: 0,
+  currentStreak: 0,
+  maxStreak: 0,
+  bestTimeMs: null,
+  avgTimeMs: null,
+  totalTimeMs: 0,
+  lastPlayedDate: "",
+  lastPlayedWon: false,
+  lastPlayedTimeMs: 0,
+};
+
+async function readDefineagramStats(): Promise<DefineagramStats> {
+  try {
+    const raw = await fs.readFile(DEFINEAGRAM_STATS_PATH, "utf8");
+    return { ...DEFAULT_DEFINEAGRAM_STATS, ...JSON.parse(raw) };
+  } catch {
+    return { ...DEFAULT_DEFINEAGRAM_STATS };
+  }
+}
+
+async function writeDefineagramStats(stats: DefineagramStats): Promise<void> {
+  await fs.mkdir(CONFIG_DIR, { recursive: true });
+  await fs.writeFile(DEFINEAGRAM_STATS_PATH, JSON.stringify(stats, null, 2), "utf8");
+}
+
+async function updateDefineagramStats(won: boolean, totalTimeMs: number, dateKey: string): Promise<DefineagramStats> {
+  const stats = await readDefineagramStats();
+  if (stats.lastPlayedDate === dateKey) return stats;
+  stats.gamesPlayed++;
+  stats.lastPlayedDate = dateKey;
+  stats.lastPlayedWon = won;
+  stats.lastPlayedTimeMs = totalTimeMs;
+  if (won) {
+    stats.gamesWon++;
+    stats.currentStreak++;
+    stats.maxStreak = Math.max(stats.maxStreak, stats.currentStreak);
+    stats.totalTimeMs += totalTimeMs;
+    if (stats.bestTimeMs === null || totalTimeMs < stats.bestTimeMs) {
+      stats.bestTimeMs = totalTimeMs;
+    }
+    stats.avgTimeMs = Math.round(stats.totalTimeMs / stats.gamesWon);
+  } else {
+    stats.currentStreak = 0;
+  }
+  await writeDefineagramStats(stats);
+  return stats;
+}
+
+function formatTimeMs(ms: number): string {
+  const totalSec = Math.floor(ms / 1000);
+  const min = Math.floor(totalSec / 60);
+  const sec = totalSec % 60;
+  return min > 0 ? `${min}m ${sec}s` : `${sec}s`;
+}
+
+function formatTimeMsShort(ms: number): string {
+  const totalSec = Math.floor(ms / 1000);
+  const min = Math.floor(totalSec / 60);
+  const sec = totalSec % 60;
+  return `${min}:${String(sec).padStart(2, "0")}`;
+}
+
 // ── Share results ────────────────────────────────────────────────────────────
 
 function generateShareText(
@@ -1855,6 +1936,600 @@ async function doPlay(config: StoredConfig, minimal = false): Promise<void> {
   }
 }
 
+// ── Defineagram ─────────────────────────────────────────────────────────────
+
+function generateDefineagramShareText(
+  dateKey: string,
+  totalTimeMs: number,
+  wrongGuesses: number,
+  hintsUsed: number,
+): string {
+  const timeStr = formatTimeMsShort(totalTimeMs);
+  let text = `Defineagram ${dateKey} ⏱ ${timeStr}\n\n`;
+  const parts: string[] = [];
+  if (wrongGuesses > 0) parts.push(`${wrongGuesses} wrong guess${wrongGuesses === 1 ? "" : "es"}`);
+  if (hintsUsed > 0) parts.push(`${hintsUsed} hint${hintsUsed === 1 ? "" : "s"}`);
+  if (parts.length > 0) text += parts.join(" · ") + "\n";
+  text += "\nplayanagrama.com";
+  return text;
+}
+
+function printDefineagramStats(stats: DefineagramStats): void {
+  const winPct = stats.gamesPlayed > 0 ? Math.round((stats.gamesWon / stats.gamesPlayed) * 100) : 0;
+
+  const lines: string[] = [];
+  lines.push(
+    accent.bold(String(stats.gamesPlayed).padStart(4)) + "      " +
+    accent.bold(String(winPct + "%").padStart(5)) + "      " +
+    accent.bold(String(stats.currentStreak).padStart(4)) + "      " +
+    accent.bold(String(stats.maxStreak).padStart(4))
+  );
+  lines.push(dim("Played    Win %    Streak    Best"));
+  lines.push("");
+
+  if (stats.bestTimeMs !== null) {
+    lines.push(dim("Best time:  ") + accent(formatTimeMs(stats.bestTimeMs)));
+  }
+  if (stats.avgTimeMs !== null) {
+    lines.push(dim("Avg time:   ") + fg(formatTimeMs(stats.avgTimeMs)));
+  }
+
+  console.log();
+  console.log(boxen(lines.join("\n"), {
+    ...boxenTheme(),
+    borderStyle: "round",
+    title: accent.bold(" Defineagram Stats "),
+    titleAlignment: "left",
+    padding: { left: 1, right: 1, top: 1, bottom: 1 },
+    margin: { left: 2 },
+  }));
+  console.log();
+}
+
+async function showDefineagramPostGameMenu(
+  dateKey: string,
+  won: boolean,
+  totalTimeMs: number,
+  wrongGuesses: number,
+  hintsUsed: number,
+): Promise<"home" | "quit"> {
+  const stats = await updateDefineagramStats(won, totalTimeMs, dateKey);
+  printDefineagramStats(stats);
+
+  if (won) {
+    const shareText = generateDefineagramShareText(dateKey, totalTimeMs, wrongGuesses, hintsUsed);
+    const previewLines = shareText.split("\n").map((l) => chalk.gray("    " + l));
+    console.log(previewLines.join("\n"));
+    console.log();
+  }
+
+  console.log(chalk.gray(`  Next puzzle in ${accent(getNextPuzzleCountdown())}`));
+  console.log();
+
+  const choices: { name: string; value: "share" | "home" | "quit" }[] = [];
+  if (won) choices.push({ name: "Share results", value: "share" });
+  choices.push({ name: "Home", value: "home" });
+  choices.push({ name: "Quit", value: "quit" });
+
+  const action = await select({ message: "What next?", choices });
+
+  if (action === "share") {
+    const shareText = generateDefineagramShareText(dateKey, totalTimeMs, wrongGuesses, hintsUsed);
+    const copied = await copyToClipboard(shareText);
+    if (copied) {
+      console.log(chalk.green("  Copied to clipboard!"));
+    } else {
+      console.log();
+      if (process.platform === "linux") {
+        console.log(chalk.yellow("  Tip: install xclip for clipboard support (sudo apt install xclip)"));
+      }
+      console.log(chalk.white("  Copy this:\n"));
+      console.log(shareText.split("\n").map((l) => "    " + l).join("\n"));
+      console.log();
+    }
+    const next = await select({
+      message: "What next?",
+      choices: [
+        { name: "Home", value: "home" as const },
+        { name: "Quit", value: "quit" as const },
+      ],
+    });
+    return next;
+  }
+  return action;
+}
+
+function printDefineagramHeader(
+  dateKey: string,
+  definition: string,
+  partOfSpeech: string | undefined,
+  difficulty: string,
+  wordLength: number,
+  elapsedMs: number,
+  wrongGuesses: number,
+  penaltyMs: number,
+  hints: string[],
+  minimal: boolean,
+  letters: string,
+  usedIndices?: Set<number>,
+  currentInput?: string,
+): void {
+  const border = chalk.hex(getTheme().border);
+
+  if (minimal) {
+    console.log();
+    console.log(bgLine(dim(`  ${dateKey}`) + dim(` · `) + accent(`⏱ ${formatTimeMs(elapsedMs + penaltyMs)}`)));
+    if (wrongGuesses > 0) console.log(bgLine(dim(`  ✗ ${wrongGuesses} (+${wrongGuesses * 5}s)`)));
+    console.log();
+    // Definition
+    const posLabel = partOfSpeech ? `${partOfSpeech}. ` : "";
+    console.log(bgLine(`  ${dim(posLabel)}${fg(definition)}`));
+    console.log();
+    console.log(bgLine(`  ${accent.bold(letters.toUpperCase().split("").join(" "))}`));
+    console.log();
+    return;
+  }
+
+  const formattedDate = formatDateLong(dateKey);
+
+  // Timer line
+  const timerStr = formatTimeMs(elapsedMs + penaltyMs);
+  const diffLabel = difficulty.charAt(0).toUpperCase() + difficulty.slice(1);
+  let statusLine = dim(`${diffLabel}`) + dim(" · ") + accent(`⏱ ${timerStr}`);
+  if (wrongGuesses > 0) {
+    statusLine += dim(" · ") + chalk.red(`✗ ${wrongGuesses}`) + dim(` (+${wrongGuesses * 5}s)`);
+  }
+
+  const headerLines: string[] = [];
+  headerLines.push(dim(`${formattedDate} (ET)`));
+  headerLines.push(statusLine);
+
+  console.log();
+  console.log(boxen(headerLines.join("\n"), {
+    ...boxenTheme(),
+    borderStyle: "round",
+    title: accent.bold(" Defineagram "),
+    titleAlignment: "left",
+    padding: { left: 1, right: 1, top: 0, bottom: 0 },
+    margin: { left: 2 },
+    width: 50,
+  }));
+  console.log();
+
+  // Definition
+  const posLabel = partOfSpeech ? chalk.italic(dim(`${partOfSpeech}. `)) : "";
+  console.log(`    ${posLabel}${chalk.italic(fg(definition))}`);
+  console.log();
+
+  // Hints
+  if (hints.length > 0) {
+    for (const h of hints) {
+      console.log(`    ${chalk.yellow("💡")} ${chalk.yellow.italic(h)}`);
+    }
+    console.log();
+  }
+
+  // Target word slots
+  const inputChars = (currentInput || "").toUpperCase().split("");
+  const topRow = "    " + Array(wordLength).fill(border("┌───┐")).join(" ");
+  const midRow = "    " + Array(wordLength).fill(0).map((_, i) => {
+    if (inputChars[i]) {
+      return border("│") + accent.bold(` ${inputChars[i]} `) + border("│");
+    }
+    return border("│") + dim(" · ") + border("│");
+  }).join(" ");
+  const botRow = "    " + Array(wordLength).fill(border("└───┘")).join(" ");
+  console.log(topRow);
+  console.log(midRow);
+  console.log(botRow);
+  console.log();
+
+  // Letter tiles
+  console.log(dim("  Letters:"));
+  console.log();
+  const letterArr = letters.toUpperCase().split("");
+  const row1 = letterArr.slice(0, 6).map((ch, i) => renderLetterTileWithState(ch, usedIndices?.has(i) || false)).join("  ");
+  const row2 = letterArr.slice(6).map((ch, i) => renderLetterTileWithState(ch, usedIndices?.has(i + 6) || false)).join("  ");
+
+  console.log(`      ${row1}`);
+  if (row2.trim()) {
+    console.log(`        ${row2}`);
+  }
+  console.log();
+  console.log(chalk.gray("  ─".repeat(25)));
+}
+
+const DEFINEAGRAM_COMMANDS = [
+  { name: "/help", desc: "Show all commands" },
+  { name: "/hint", desc: "Get a hint (+10s)" },
+  { name: "/reveal", desc: "Show the answer (forfeit)" },
+  { name: "/exit", desc: "Return to menu" },
+  { name: "/quit", desc: "Exit the app" },
+  { name: "/shuffle", desc: "Shuffle the letters" },
+];
+
+function printDefineagramCommands(): void {
+  const lines: string[] = [];
+  lines.push(accent("/help     ") + fg("Show this help"));
+  lines.push(accent("/hint     ") + fg("Get a hint (+10s penalty)"));
+  lines.push(accent("/reveal   ") + fg("Show the answer (forfeit)"));
+  lines.push(accent("/shuffle  ") + fg("Shuffle the letters"));
+  lines.push(accent("/exit     ") + fg("Return to menu"));
+  lines.push(accent("/quit     ") + fg("Exit the app"));
+
+  console.log();
+  console.log(boxen(lines.join("\n"), {
+    ...boxenTheme(),
+    borderStyle: "round",
+    title: accent.bold(" Commands "),
+    titleAlignment: "left",
+    padding: { left: 1, right: 1, top: 1, bottom: 1 },
+    margin: { left: 2 },
+  }));
+  console.log();
+}
+
+async function doPlayDefineagram(config: StoredConfig, minimal = false): Promise<void> {
+  const apiUrl = normalizeBaseUrl(config.apiUrl || DEFAULT_API_URL);
+  const token = config.token;
+  const useMinimal = minimal || config.minimal || false;
+
+  if (!token) {
+    console.log("You need to log in first.");
+    return;
+  }
+
+  const spinner = new ColorSpinner("Loading today's Defineagram...");
+  spinner.start();
+
+  const puzzle = await apiGet<{
+    id?: string;
+    dateKey?: string;
+    letters?: string;
+    definition?: string;
+    wordLength?: number;
+    difficulty?: string;
+    extraLetters?: number;
+    phonetic?: string;
+    partOfSpeech?: string;
+    hintsAvailable?: number;
+    session?: {
+      completed?: boolean;
+      revealed?: boolean;
+      attempts?: number;
+      timeMs?: number;
+      wrongGuesses?: number;
+      penaltyMs?: number;
+      totalTimeMs?: number;
+      startedAt?: string;
+      hintsUsed?: number;
+      usedHints?: string[];
+      inProgressWrongGuesses?: number;
+      inProgressPenaltyMs?: number;
+      word?: string;
+    };
+    error?: string;
+  }>(apiUrl, "/api/definagram/daily", token);
+
+  spinner.stop();
+
+  if (puzzle.status >= 400 || puzzle.data?.error) {
+    console.log(chalk.red("Failed to load puzzle."));
+    if (puzzle.data?.error) console.log(puzzle.data.error);
+    return;
+  }
+
+  const dateKey = puzzle.data.dateKey || puzzle.data.id || localDateKey();
+  const letters = puzzle.data.letters || "";
+  const definition = puzzle.data.definition || "No definition available.";
+  const wordLength = puzzle.data.wordLength || 5;
+  const difficulty = puzzle.data.difficulty || "medium";
+  const partOfSpeech = puzzle.data.partOfSpeech;
+  const phonetic = puzzle.data.phonetic;
+
+  // If already completed or revealed
+  if (puzzle.data.session?.completed || puzzle.data.session?.revealed) {
+    clearScreen();
+    const formattedDate = formatDateLong(dateKey);
+    const sess = puzzle.data.session;
+    console.log();
+    if (sess.completed && !sess.revealed) {
+      const totalMs = sess.totalTimeMs || sess.timeMs || 0;
+      console.log(chalk.green.bold("  🎉 You already solved today's Defineagram!"));
+      console.log(chalk.gray(`     ${formattedDate} — Solved in ${formatTimeMs(totalMs)}`));
+      if (sess.word) {
+        console.log(chalk.gray(`     The word was: ${chalk.white.bold(sess.word.toUpperCase())}`));
+      }
+    } else {
+      console.log(chalk.yellow("  You've already seen today's Defineagram answer."));
+      console.log(chalk.gray(`     ${formattedDate}`));
+      if (sess.word) {
+        console.log(chalk.gray(`     The word was: ${chalk.white.bold(sess.word.toUpperCase())}`));
+      }
+    }
+    console.log();
+
+    const won = !!(sess.completed && !sess.revealed);
+    const totalMs = sess.totalTimeMs || sess.timeMs || 0;
+    const postAction = await showDefineagramPostGameMenu(
+      dateKey, won, totalMs, sess.wrongGuesses || 0, sess.hintsUsed || 0,
+    );
+    if (postAction === "quit") {
+      console.log(chalk.gray("  Goodbye!"));
+      process.exit(0);
+    }
+    return;
+  }
+
+  // Record start time on server
+  await apiPost(apiUrl, "/api/definagram/daily/start", {
+    puzzleId: dateKey,
+    difficulty,
+  }, token).catch(() => {});
+
+  // Resume state from server
+  let wrongGuesses = puzzle.data.session?.inProgressWrongGuesses || puzzle.data.session?.wrongGuesses || 0;
+  let penaltyMs = puzzle.data.session?.inProgressPenaltyMs || puzzle.data.session?.penaltyMs || 0;
+  let hintsUsed = puzzle.data.session?.hintsUsed || 0;
+  const currentHints: string[] = [...(puzzle.data.session?.usedHints || [])];
+
+  // Timer: resume from server startedAt if available
+  const serverStartedAt = puzzle.data.session?.startedAt;
+  const startTime = serverStartedAt ? new Date(serverStartedAt).getTime() : Date.now();
+
+  let currentLetters = letters;
+  const letterPool = currentLetters.toUpperCase().split("");
+  let done = false;
+
+  const getElapsedMs = () => Date.now() - startTime;
+
+  // Render game
+  const renderGame = (shouldClear = false, usedIndices?: Set<number>, currentInput?: string) => {
+    if (shouldClear) clearScreen();
+    printDefineagramHeader(
+      dateKey, definition, partOfSpeech, difficulty, wordLength,
+      getElapsedMs(), wrongGuesses, penaltyMs, currentHints, useMinimal,
+      currentLetters, usedIndices, currentInput,
+    );
+  };
+
+  // Initial render
+  renderGame(true);
+  if (!useMinimal) console.log(chalk.gray("    / for shortcuts"));
+  console.log();
+
+  while (!done) {
+    const { input: answer, isCommand } = await interactiveInput(
+      letterPool,
+      (input, usedIndices) => {
+        renderGame(true, usedIndices, input);
+        if (!useMinimal) console.log(chalk.gray("    / for shortcuts"));
+        console.log();
+      }
+    );
+
+    if (!answer) continue;
+
+    // Handle commands
+    if (isCommand || answer.startsWith("/")) {
+      const cmd = answer.startsWith("/") ? answer.slice(1).split(" ")[0] : answer;
+      switch (cmd) {
+        case "help":
+        case "h":
+          renderGame(true);
+          printDefineagramCommands();
+          console.log(chalk.gray("    Press any key to continue..."));
+          await new Promise<void>((resolve) => {
+            const stdin = process.stdin;
+            stdin.setRawMode(true);
+            stdin.resume();
+            stdin.once("data", () => {
+              stdin.setRawMode(false);
+              resolve();
+            });
+          });
+          renderGame(true);
+          if (!useMinimal) console.log(chalk.gray("    / for shortcuts"));
+          console.log();
+          continue;
+        case "hint": {
+          const hintResult = await apiPost<{
+            hint?: string;
+            hintsRemaining?: number;
+            penaltyMs?: number;
+            error?: string;
+          }>(apiUrl, "/api/definagram/hint", {
+            puzzleId: dateKey,
+            difficulty,
+            hintsUsed,
+          }, token);
+
+          if (hintResult.status >= 400 || hintResult.data.error) {
+            renderGame(true);
+            if (!useMinimal) console.log(chalk.gray("    / for shortcuts"));
+            console.log();
+            console.log(chalk.yellow(`  ${hintResult.data.error || "No hints available"}`));
+            console.log();
+          } else if (hintResult.data.hint) {
+            // Check for duplicate hint
+            if (!currentHints.includes(hintResult.data.hint)) {
+              currentHints.push(hintResult.data.hint);
+              hintsUsed++;
+              penaltyMs += 10000;
+              // Save progress
+              apiPost(apiUrl, "/api/definagram/daily/progress", {
+                puzzleId: dateKey,
+                difficulty,
+                wrongGuesses,
+                penaltyMs,
+              }, token).catch(() => {});
+            }
+
+            renderGame(true);
+            if (!useMinimal) console.log(chalk.gray("    / for shortcuts"));
+            console.log();
+            console.log(chalk.yellow(`  💡 ${hintResult.data.hint}`));
+            console.log(chalk.gray(`     +10s penalty`));
+            console.log();
+          }
+          continue;
+        }
+        case "reveal": {
+          const revealResult = await apiGet<{
+            word?: string;
+            definition?: string;
+            phonetic?: string;
+            partOfSpeech?: string;
+          }>(apiUrl, `/api/definagram/reveal?puzzleId=${encodeURIComponent(dateKey)}&difficulty=${difficulty}`, token);
+
+          done = true;
+          clearScreen();
+          console.log();
+          if (revealResult.data.word) {
+            console.log(chalk.yellow("  The answer was:"));
+            console.log(chalk.white.bold(`     ${revealResult.data.word.toUpperCase()}`));
+            if (revealResult.data.phonetic) {
+              console.log(chalk.cyan(`     ${revealResult.data.phonetic}`));
+            }
+          } else {
+            console.log(chalk.yellow("  Puzzle revealed."));
+          }
+          console.log();
+
+          const postAction = await showDefineagramPostGameMenu(
+            dateKey, false, getElapsedMs() + penaltyMs, wrongGuesses, hintsUsed,
+          );
+          if (postAction === "quit") {
+            console.log(chalk.gray("  Goodbye!"));
+            process.exit(0);
+          }
+          return;
+        }
+        case "exit":
+        case "back":
+        case "menu":
+          console.log(chalk.gray("  Returning to menu..."));
+          return;
+        case "quit":
+        case "q":
+          console.log(chalk.gray("  Goodbye!"));
+          process.exit(0);
+        case "shuffle":
+        case "s":
+          currentLetters = currentLetters.split("").sort(() => Math.random() - 0.5).join("");
+          letterPool.length = 0;
+          letterPool.push(...currentLetters.toUpperCase().split(""));
+          renderGame(true);
+          if (!useMinimal) console.log(chalk.gray("    / for shortcuts"));
+          console.log();
+          process.stdout.write("\n" + chalk.gray("  Letters shuffled!") + "\x1b[1A\r");
+          continue;
+        default:
+          renderGame(true);
+          if (!useMinimal) console.log(chalk.gray("    / for shortcuts"));
+          console.log();
+          process.stdout.write("\n" + chalk.yellow(`  Unknown command: /${cmd}. Type /help for commands.`) + "\x1b[1A\r");
+          continue;
+      }
+    }
+
+    // Validate length
+    if (answer.length !== wordLength) {
+      renderGame(true);
+      if (!useMinimal) console.log(chalk.gray("    / for shortcuts"));
+      console.log();
+      console.log(chalk.yellow(`  Word must be exactly ${wordLength} letters`));
+      console.log();
+      continue;
+    }
+
+    // Submit guess
+    const result = await apiPost<{
+      correct?: boolean;
+      word?: string;
+      phonetic?: string;
+      partOfSpeech?: string;
+      message?: string;
+    }>(apiUrl, "/api/definagram/guess", {
+      guess: answer,
+      puzzleId: dateKey,
+      difficulty,
+    }, token);
+
+    if (result.status >= 500) {
+      renderGame(true);
+      if (!useMinimal) console.log(chalk.gray("    / for shortcuts"));
+      console.log();
+      console.log(chalk.red("  Server error."));
+      break;
+    }
+
+    if (result.data.correct) {
+      done = true;
+      const elapsedMs = getElapsedMs();
+      const totalTimeMs = elapsedMs + penaltyMs;
+
+      // Submit completion to server
+      await apiPost(apiUrl, "/api/definagram/daily", {
+        puzzleId: dateKey,
+        difficulty,
+        timeMs: elapsedMs,
+        wrongGuesses,
+      }, token).catch(() => {});
+
+      clearScreen();
+      console.log();
+      console.log(chalk.bold.green("  🎉 You found it!"));
+      const word = result.data.word || answer;
+      console.log(chalk.gray(`     The word was: ${chalk.white.bold(word.toUpperCase())}`));
+      if (result.data.phonetic || phonetic) {
+        console.log(chalk.cyan(`     ${result.data.phonetic || phonetic}`));
+      }
+      console.log();
+
+      // Time breakdown
+      const timeStr = formatTimeMs(elapsedMs);
+      if (penaltyMs > 0) {
+        console.log(chalk.gray(`     ${timeStr} + ${formatTimeMs(penaltyMs)} penalty = ${accent(formatTimeMs(totalTimeMs))}`));
+      } else {
+        console.log(chalk.gray(`     Time: ${accent(formatTimeMs(totalTimeMs))}`));
+      }
+      console.log();
+
+      const postAction = await showDefineagramPostGameMenu(
+        dateKey, true, totalTimeMs, wrongGuesses, hintsUsed,
+      );
+      if (postAction === "quit") {
+        console.log(chalk.gray("  Goodbye!"));
+        process.exit(0);
+      }
+      return;
+    } else {
+      // Wrong guess
+      wrongGuesses++;
+      penaltyMs += 5000;
+
+      // Save progress to server
+      apiPost(apiUrl, "/api/definagram/daily/progress", {
+        puzzleId: dateKey,
+        difficulty,
+        wrongGuesses,
+        penaltyMs,
+      }, token).catch(() => {});
+
+      renderGame(true);
+      if (!useMinimal) console.log(chalk.gray("    / for shortcuts"));
+      console.log();
+
+      const msg = result.data.message || "Wrong! Try again.";
+      console.log(chalk.red(`    ✗ ${msg}`) + chalk.gray(` (+5s penalty)`));
+      console.log();
+    }
+  }
+}
+
+// ── Main loop ───────────────────────────────────────────────────────────────
+
 async function mainLoop(): Promise<void> {
   // Migrate any existing plain-text tokens to secure storage
   await migrateCredentials();
@@ -1918,19 +2593,51 @@ async function mainLoop(): Promise<void> {
       }
     }
 
+    // Sync Defineagram status too
+    if (config.token) {
+      try {
+        const apiUrl = normalizeBaseUrl(config.apiUrl || DEFAULT_API_URL);
+        const defPuzzle = await apiGet<{
+          dateKey?: string;
+          session?: { completed?: boolean; revealed?: boolean; totalTimeMs?: number; timeMs?: number };
+        }>(apiUrl, "/api/definagram/daily", config.token);
+        if (defPuzzle.status < 400 && defPuzzle.data.session?.completed) {
+          const serverDateKey = defPuzzle.data.dateKey || localDateKey();
+          const defStats = await readDefineagramStats();
+          const won = !!(defPuzzle.data.session.completed && !defPuzzle.data.session.revealed);
+          const totalMs = defPuzzle.data.session.totalTimeMs || defPuzzle.data.session.timeMs || 0;
+          if (defStats.lastPlayedDate !== serverDateKey) {
+            await updateDefineagramStats(won, totalMs, serverDateKey);
+          } else if (won && !defStats.lastPlayedWon) {
+            defStats.lastPlayedWon = true;
+            defStats.lastPlayedTimeMs = totalMs;
+            await writeDefineagramStats(defStats);
+          }
+        }
+      } catch {
+        // Network error — skip
+      }
+    }
+
     const stats = await readStats();
+    const defStats = await readDefineagramStats();
     const todayKey = localDateKey();
-    const solvedToday = !!config.token && stats.lastPlayedDate === todayKey && stats.lastPlayedWon;
+    const solvedAnagramaToday = !!config.token && stats.lastPlayedDate === todayKey && stats.lastPlayedWon;
+    const solvedDefineagramToday = !!config.token && defStats.lastPlayedDate === todayKey && defStats.lastPlayedWon;
 
     clearScreen();
     printHomescreen(config, useMinimal);
 
-    // Show "already solved" banner
-    if (solvedToday) {
+    // Show "already solved" banners
+    if (solvedAnagramaToday || solvedDefineagramToday) {
       const dateStr = new Date().toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" });
+      const solvedGames: string[] = [];
+      if (solvedAnagramaToday) solvedGames.push(`Anagrama (${stats.lastPlayedAttempts} attempt${stats.lastPlayedAttempts === 1 ? "" : "s"})`);
+      if (solvedDefineagramToday) solvedGames.push(`Defineagram (${formatTimeMs(defStats.lastPlayedTimeMs)})`);
       console.log(boxen(
-        chalk.green.bold("🎉 You already solved today's puzzle!") + "\n" +
-        dim(`${dateStr} — Solved in ${stats.lastPlayedAttempts} attempt${stats.lastPlayedAttempts === 1 ? "" : "s"}`),
+        chalk.green.bold("🎉 Today's progress") + "\n" +
+        dim(dateStr) + "\n" +
+        solvedGames.map(g => chalk.green("✅ ") + fg(g)).join("\n"),
         {
           ...boxenTheme(),
           borderStyle: "round",
@@ -2022,7 +2729,8 @@ async function mainLoop(): Promise<void> {
         const action = await select({
           message: "What would you like to do?",
           choices: [
-            { name: solvedToday ? "✅ Play today's puzzle" : "Play today's puzzle", value: "play" },
+            { name: solvedAnagramaToday ? "✅ Play Anagrama" : "Play Anagrama", value: "anagrama" },
+            { name: solvedDefineagramToday ? "✅ Play Defineagram" : "Play Defineagram", value: "defineagram" },
             { name: "View stats", value: "stats" },
             { name: "Leaderboard", value: "leaderboard" },
             { name: "Settings", value: "settings" },
@@ -2035,15 +2743,22 @@ async function mainLoop(): Promise<void> {
         process.stdout.removeListener('resize', onResize);
 
         switch (action) {
-          case "play":
+          case "anagrama":
             await doPlay(config, globalMinimal);
+            break;
+          case "defineagram":
+            await doPlayDefineagram(config, globalMinimal);
             break;
           case "leaderboard":
             await open("https://playanagrama.com/leaderboards");
             break;
           case "stats": {
-            const stats = await readStats();
-            printStats(stats);
+            const anagramaStats = await readStats();
+            printStats(anagramaStats);
+            const defineagramStats = await readDefineagramStats();
+            if (defineagramStats.gamesPlayed > 0) {
+              printDefineagramStats(defineagramStats);
+            }
             console.log(chalk.gray("  Press Enter to continue..."));
             const rl3 = readline.createInterface({ input: process.stdin, output: process.stdout });
             await rl3.question("");
@@ -2148,6 +2863,19 @@ program
       config.apiUrl = normalizeBaseUrl(opts.url);
     }
     await doPlay(config, opts.minimal);
+  });
+
+program
+  .command("defineagram")
+  .description("Play the daily Defineagram puzzle")
+  .option("-u, --url <url>", "API base URL")
+  .option("-m, --minimal", "Use minimal output mode")
+  .action(async (opts) => {
+    const config = await readConfig();
+    if (opts.url) {
+      config.apiUrl = normalizeBaseUrl(opts.url);
+    }
+    await doPlayDefineagram(config, opts.minimal);
   });
 
 program.parseAsync(process.argv);
